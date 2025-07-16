@@ -1,0 +1,459 @@
+#! /bin/bash
+# Disclaimer of Warranties.
+# A. YOU EXPRESSLY ACKNOWLEDGE AND AGREE THAT, TO THE EXTENT PERMITTED BY
+#    APPLICABLE LAW, USE OF THIS SHELL SCRIPT AND ANY SERVICES PERFORMED
+#    BY OR ACCESSED THROUGH THIS SHELL SCRIPT IS AT YOUR SOLE RISK AND
+#    THAT THE ENTIRE RISK AS TO SATISFACTORY QUALITY, PERFORMANCE, ACCURACY AND
+#    EFFORT IS WITH YOU.
+#
+# B. TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW, THIS SHELL SCRIPT
+#    AND SERVICES ARE PROVIDED "AS IS" AND "AS AVAILABLE", WITH ALL FAULTS AND
+#    WITHOUT WARRANTY OF ANY KIND, AND THE AUTHOR OF THIS SHELL SCRIPT'S LICENSORS
+#    (COLLECTIVELY REFERRED TO AS "THE AUTHOR" FOR THE PURPOSES OF THIS DISCLAIMER)
+#    HEREBY DISCLAIM ALL WARRANTIES AND CONDITIONS WITH RESPECT TO THIS SHELL SCRIPT
+#    SOFTWARE AND SERVICES, EITHER EXPRESS, IMPLIED OR STATUTORY, INCLUDING, BUT
+#    NOT LIMITED TO, THE IMPLIED WARRANTIES AND/OR CONDITIONS OF
+#    MERCHANTABILITY, SATISFACTORY QUALITY, FITNESS FOR A PARTICULAR PURPOSE,
+#    ACCURACY, QUIET ENJOYMENT, AND NON-INFRINGEMENT OF THIRD PARTY RIGHTS.
+#
+# C. THE AUTHOR DOES NOT WARRANT AGAINST INTERFERENCE WITH YOUR ENJOYMENT OF THE
+#    THE AUTHOR's SOFTWARE AND SERVICES, THAT THE FUNCTIONS CONTAINED IN, OR
+#    SERVICES PERFORMED OR PROVIDED BY, THIS SHELL SCRIPT WILL MEET YOUR
+#    REQUIREMENTS, THAT THE OPERATION OF THIS SHELL SCRIPT OR SERVICES WILL
+#    BE UNINTERRUPTED OR ERROR-FREE, THAT ANY SERVICES WILL CONTINUE TO BE MADE
+#    AVAILABLE, THAT THIS SHELL SCRIPT OR SERVICES WILL BE COMPATIBLE OR
+#    WORK WITH ANY THIRD PARTY SOFTWARE, APPLICATIONS OR THIRD PARTY SERVICES,
+#    OR THAT DEFECTS IN THIS SHELL SCRIPT OR SERVICES WILL BE CORRECTED.
+#    INSTALLATION OF THIS THE AUTHOR SOFTWARE MAY AFFECT THE USABILITY OF THIRD
+#    PARTY SOFTWARE, APPLICATIONS OR THIRD PARTY SERVICES.
+#
+# D. YOU FURTHER ACKNOWLEDGE THAT THIS SHELL SCRIPT AND SERVICES ARE NOT
+#    INTENDED OR SUITABLE FOR USE IN SITUATIONS OR ENVIRONMENTS WHERE THE FAILURE
+#    OR TIME DELAYS OF, OR ERRORS OR INACCURACIES IN, THE CONTENT, DATA OR
+#    INFORMATION PROVIDED BY THIS SHELL SCRIPT OR SERVICES COULD LEAD TO
+#    DEATH, PERSONAL INJURY, OR SEVERE PHYSICAL OR ENVIRONMENTAL DAMAGE,
+#    INCLUDING WITHOUT LIMITATION THE OPERATION OF NUCLEAR FACILITIES, AIRCRAFT
+#    NAVIGATION OR COMMUNICATION SYSTEMS, AIR TRAFFIC CONTROL, LIFE SUPPORT OR
+#    WEAPONS SYSTEMS.
+#
+# E. NO ORAL OR WRITTEN INFORMATION OR ADVICE GIVEN BY THE AUTHOR
+#    SHALL CREATE A WARRANTY. SHOULD THIS SHELL SCRIPT OR SERVICES PROVE DEFECTIVE,
+#    YOU ASSUME THE ENTIRE COST OF ALL NECESSARY SERVICING, REPAIR OR CORRECTION.
+#
+#    Limitation of Liability.
+# F. TO THE EXTENT NOT PROHIBITED BY APPLICABLE LAW, IN NO EVENT SHALL THE AUTHOR
+#    BE LIABLE FOR PERSONAL INJURY, OR ANY INCIDENTAL, SPECIAL, INDIRECT OR
+#    CONSEQUENTIAL DAMAGES WHATSOEVER, INCLUDING, WITHOUT LIMITATION, DAMAGES
+#    FOR LOSS OF PROFITS, CORRUPTION OR LOSS OF DATA, FAILURE TO TRANSMIT OR
+#    RECEIVE ANY DATA OR INFORMATION, BUSINESS INTERRUPTION OR ANY OTHER
+#    COMMERCIAL DAMAGES OR LOSSES, ARISING OUT OF OR RELATED TO YOUR USE OR
+#    INABILITY TO USE THIS SHELL SCRIPT OR SERVICES OR ANY THIRD PARTY
+#    SOFTWARE OR APPLICATIONS IN CONJUNCTION WITH THIS SHELL SCRIPT OR
+#    SERVICES, HOWEVER CAUSED, REGARDLESS OF THE THEORY OF LIABILITY (CONTRACT,
+#    TORT OR OTHERWISE) AND EVEN IF THE AUTHOR HAS BEEN ADVISED OF THE
+#    POSSIBILITY OF SUCH DAMAGES. SOME JURISDICTIONS DO NOT ALLOW THE EXCLUSION
+#    OR LIMITATION OF LIABILITY FOR PERSONAL INJURY, OR OF INCIDENTAL OR
+#    CONSEQUENTIAL DAMAGES, SO THIS LIMITATION MAY NOT APPLY TO YOU. In no event
+#    shall THE AUTHOR's total liability to you for all damages (other than as may
+#    be required by applicable law in cases involving personal injury) exceed
+#    the amount of five dollars ($5.00). The foregoing limitations will apply
+#    even if the above stated remedy fails of its essential purpose.
+################################################################################
+#
+# ---
+# ### Security Advisory: Command Injection Risk in `tests/check_pip`
+#
+# When using the `tests/check_pip` script, be aware of a potential command injection vulnerability arising from module names containing special characters or leading hyphens (e.g., `-v`). The script has been updated to properly handle such module names by:
+#
+# - Using `--` in `grep` commands to prevent interpreting module names as options.
+# - Ensuring all inputs are correctly sanitized and special characters are handled safely.
+#
+# **Recommendations for Developers:**
+#
+# - **Validation:** Always ensure that variables used in shell commands are properly handled to avoid being misinterpreted as options or commands.
+# - **Updates:** Pull the latest changes from the repository to incorporate the security fixes in `tests/check_pip`.
+# - **Testing:** Incorporate static code analysis tools to detect similar vulnerabilities in the future.
+# ---
+#
+# check_pip: Audit and validate Python requirements files.
+# This, best-effort, script audits and validates Python requirements
+# files using tools like pip-audit and pip-licenses.
+# It accomplishes the following tasks:
+# 1. Sets up a safe execution environment with resource limits and UTF-8 encoding.
+# 2. Checks for the existence and executability of required commands.
+# 3. Implements a lock mechanism to prevent concurrent executions.
+# 4. Gathers all requirements.txt files from the project using git.
+# 5. Audits requirements files for security vulnerabilities using pip-audit.
+# 6. Checks licenses of dependencies using pip-licenses.
+# 7. Reports any findings and cleans up before exiting.
+#
+# Usage Summary:
+#   ./tests/check_pip [--fix]
+# Use the '--fix' option to enable auto-correction of vulnerabilities.
+#
+# Exit Code Summary:
+# The script uses the EXIT_CODE variable to track exit conditions:
+# -   0: Successful execution.
+# -   1: General failure.
+# -   3: git ls-tree command failed.
+# -   4: pip-audit failed.
+# -   5: pip-licenses failed.
+# -   6: pip install/unistall failed.
+# -  40: Missing valid repository or source structure.
+# - 126: Script already in progress or command not executable.
+# - 129: Received SIGHUP signal.
+# - 130: Received SIGINT signal (Ctrl+C).
+# - 131: Received SIGQUIT signal.
+# - 137: Received SIGABRT signal.
+# - 143: Received SIGTERM signal.
+
+# Try to safely setup and fail fast if unable.
+ulimit -t 600
+# setting the path may break brain-dead CI that uses crazy paths
+# PATH="/bin:/sbin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin"
+umask 137
+
+# force utf-8 for checking in script
+LC_CTYPE="${LC_CTYPE:-en_US.UTF-8}"
+export LC_CTYPE
+# set remaining variables
+LOCK_FILE="${TMPDIR:-/tmp}/org.pak.multicast.pip-check-shell"
+# Global variable to track temporary directories
+TEMP_DIRS=""
+# Global variable to track initial directories
+readonly PRE_OLDPWD="${OLDPWD:-${PWD:-$(pwd)}}"
+readonly PRE_PWD="${PWD:-$(pwd)}"
+
+# Function to check if a command exists.
+
+# USAGE:
+#	~$ check_command CMD
+# Arguments:
+# CMD (Required) -- Name of the command to check
+# Results:
+#	exits 64 -- missing required argument
+#	exits 126 -- check complete and has failed, can not find given command.
+#	returns successful -- check complete and command found to be executable.
+function check_command() {
+	test -z "$1" && { printf "::error file=%s,line=%s,title=COMMAND::%s\n" \
+				"${SCRIPT_FILE}" "${BASH_LINENO:-0}" \
+				"Error: command name is required to check for existence." >&2 ; exit 64 ;} ;
+	local cmd="$1" ;
+	# shellcheck disable=SC2086
+	test -x "$(command -v ${cmd})" || { printf "::error file=%s,line=%s,title=COMMAND::%s\n" \
+				"${SCRIPT_FILE}" "${BASH_LINENO:-0}" \
+				"Error: Required command '$cmd' is not found." >&2 ; exit 126 ;} ;
+}  # end check_command()
+# propagate/export function to sub-shells
+export -f check_command
+
+# Set up CEP-5 shlock helper
+hash -p ./.github/tool_shlock_helper.sh shlock || { printf "%s\n" "Error: Failed to register shlock helper. CEP-5 locking will not work." >&2 ; exit 78 ; } ;
+
+# Check required commands
+function check_required_commands() {
+	local -ra REQUIRED_COMMANDS=("grep" "python3" "git" "mktemp" "sed" "tee" "tr" "cut" "pip")
+	local cmd
+	for cmd in "${REQUIRED_COMMANDS[@]}"; do
+		check_command "${cmd}"
+	done
+}
+
+check_required_commands
+
+if command -v pip-audit >/dev/null 2>&1; then
+	check_command pip-audit  # optional
+else
+	python3 -B .github/tools/cioutput.py -l info --file "${SCRIPT_FILE}" --line ${BASH_LINENO:-0} --title "SKIP" "pip-audit not found, skipping security checks"
+fi
+check_command pip-licenses ;
+check_command shlock ;
+# Set default exitcode to failure until sure we won't need to abort
+EXIT_CODE=1
+
+# end of bootstraping, use functions below this point
+
+# Function to check if a command exists.
+
+# USAGE:
+#	~$ cleanup
+# Arguments:
+#	N/A
+# Results:
+#	returns -- once cleanup has been done on a best-effort case.
+function cleanup() {
+	# shellcheck disable=SC2086
+	for dir in ${TEMP_DIRS}; do
+		if [[ ( -n "${dir}" ) ]] && [[ ( -d "${dir}" ) ]]; then
+			rm -rfd "${dir}" 2>/dev/null || : ;
+		fi
+	done
+	rm -f "${LOCK_FILE}" 2>/dev/null || : ; wait ;
+	# best effort to restore starting location
+	# shellcheck disable=SC2015
+	cd "${PRE_PWD}" && cd "${PRE_OLDPWD}" 2>/dev/null || : ;
+	cd "${PRE_PWD}" 2>/dev/null || : ;
+	# unset when done
+	unset TEMP_DIRS 2>/dev/null || : ;
+	unset PRE_OLDPWD 2>/dev/null || : ;
+	unset PRE_PWD 2>/dev/null || : ;
+	unset LOCK_FILE 2>/dev/null || : ;
+	hash -d shlock 2>/dev/null || : ;
+}
+
+function handle_signals() {
+	if [[ ( $(shlock -f "${LOCK_FILE}" -p $$ ) -eq 0 ) ]] ; then
+		EXIT_CODE=0
+		trap 'cleanup 2>/dev/null || rm -f ${LOCK_FILE} 2>/dev/null || true ; wait ; exit 129 ;' SIGHUP || EXIT_CODE=129
+		trap 'cleanup 2>/dev/null || rm -f ${LOCK_FILE} 2>/dev/null || true ; wait ; exit 143 ;' SIGTERM || EXIT_CODE=143
+		trap 'cleanup 2>/dev/null || rm -f ${LOCK_FILE} 2>/dev/null || true ; wait ; exit 131 ;' SIGQUIT || EXIT_CODE=131
+		# SC2173 - https://github.com/koalaman/shellcheck/wiki/SC2173
+		# shellcheck disable=SC2173
+		#trap 'cleanup 2>/dev/null || rm -f ${LOCK_FILE} 2>/dev/null || true ; wait ; exit 1 ;' SIGSTOP || EXIT_CODE=7
+		trap 'cleanup 2>/dev/null || rm -f ${LOCK_FILE} 2>/dev/null || true ; wait ; exit 130 ;' SIGINT || EXIT_CODE=130
+		trap 'cleanup 2>/dev/null || rm -f ${LOCK_FILE} 2>/dev/null || true ; wait ; exit 137 ;' SIGABRT || EXIT_CODE=137
+		trap 'cleanup 2>/dev/null || rm -f ${LOCK_FILE} 2>/dev/null || true ; wait ; exit ${EXIT_CODE} ;' EXIT || EXIT_CODE=1
+	else
+		# shellcheck disable=SC2046
+		python3 -B .github/tools/cioutput.py -l info --file "${SCRIPT_FILE}" --line ${BASH_LINENO:-0} --title "SKIP" "Check PIP Configuration Tests already in progress by "$(head "${LOCK_FILE}") >&2 ;
+		exit 126 ;
+	fi
+}
+
+handle_signals
+
+# lazy defined variables should be defined now that this is the only script instance.
+# identify git root
+if GIT_ROOT_DIR=$(git rev-parse --show-superproject-working-tree 2>/dev/null); then
+	if [ -z "${GIT_ROOT_DIR}" ]; then
+		GIT_ROOT_DIR=$(git rev-parse --show-toplevel 2>/dev/null)
+	fi
+else
+		python3 -B .github/tools/cioutput.py -l error --file "${SCRIPT_FILE}" --line ${BASH_LINENO:-0} --title "FAIL" "Missing valid repository or source structure." >&2
+	EXIT_CODE=40
+fi
+
+CIOUTPUT_PY=".github/tools/cioutput.py"
+# check for tool by full path
+if [[ ( -r ${GIT_ROOT_DIR}/.github/tools/cioutput.py ) ]] ; then
+	# set absolute path to .github/tools/cioutput.py
+	CIOUTPUT_PY=${GIT_ROOT_DIR}/.github/tools/cioutput.py
+else
+	python3 -B .github/tools/cioutput.py -l info --file "${SCRIPT_FILE}" --line ${BASH_LINENO:-0} --title "SKIP" "Required CI Output tool can not be found." >&2 ;
+	EXIT_CODE=126
+fi
+
+
+# set the script-file to check_pip
+SCRIPT_FILE="tests/check_pip"
+# Set pip-audit options
+AUDIT_OPTIONS="--progress-spinner off --desc on --requirement"
+# List of Allowed Licenses delimited by semicolon ;
+ALLOW_LICENSES="Public Domain;CC0 1.0 Universal;Public Domain Dedication; Zero-Clause BSD;Apache Software License;Apache-2.0;MIT License;BSD License;Python Software Foundation License;The Unlicense (Unlicense);Mozilla Public License 2.0 (MPL 2.0);"
+# Set pip-licenses options
+LICENSE_OPTIONS="--from=mixed"
+# Set pip options
+PIP_COMMON_FLAGS="--require-virtualenv --use-pep517 --exists-action s --upgrade --upgrade-strategy only-if-needed --quiet"
+# Set Env and OS specific pip options
+if [[ $( \uname -s ) == "*arwin" ]] ; then
+	PIP_ENV_FLAGS="--break-system-packages"
+	LICENSE_OPTIONS="--python python3 ${LICENSE_OPTIONS} --ignore-packages certifi"
+else
+	PIP_ENV_FLAGS=""
+	LICENSE_OPTIONS="${LICENSE_OPTIONS} --partial-match --ignore-packages chardet"
+fi ;
+# ignore common but OPTIONAL and NOT-BUNDLED packages
+# urllib3 is licensed under MIT, but reports "UNKNOWN"
+# roman-numerals-py is Public Domain but reports multiple
+# Sphinx is licensed under BSD, but reports "UNKNOWN"
+# typing_extensions is licensed under Python Software Foundation License, but reports "UNKNOWN"
+# pytest-enabler is licensed under MIT, but reports "UNKNOWN"
+# pycodestyle is licensed under MIT, but reports just "MIT" (which does not match "MIT License")
+LICENSE_OPTIONS="${LICENSE_OPTIONS} urllib3 pip setuptools wheel build hypothesis certifi roman-numerals-py Sphinx typing_extensions pytest-enabler pycodestyle"
+# Enable auto-fix if '--fix' argument is provided
+if [[ "$1" == "--fix" ]]; then
+	AUDIT_OPTIONS="--fix --strict ${AUDIT_OPTIONS}"
+	python3 -B "${CIOUTPUT_PY}" --log-level debug -l debug "Auto-fix enabled."
+fi
+
+# lazy defined functions should be defined now that this is the only script instance.
+
+# === Virtual Environment Management ===
+function setup_venv() {
+	local RES_CODE="${EXIT_CODE-0}"
+	local temp_dir
+	# relax umask to allow mktemp and venv
+	umask 007
+	python3 -B "${CIOUTPUT_PY}" --log-level debug -l debug "need venv ..."
+	# Create a temporary directory for the virtual environment
+	temp_dir=$(mktemp -d)
+	TEMP_DIRS="${TEMP_DIRS} ${temp_dir}" ;
+	# Enter the temporary directory
+	cd "${temp_dir}" || RES_CODE=69 ;
+	# Create a virtual environment using venv
+	python3 -m venv venv
+	# shellcheck disable=SC1091
+	source venv/bin/activate
+	# tighten up umask for checks
+	umask 037
+	return "${RES_CODE:-0}"
+}
+
+function cleanup_venv() {
+	local temp_dir="${PWD}"
+	# Deactivate the virtual environment
+	deactivate
+	# return to starting dir
+	cd "${OLDPWD}" || return $? ;
+	# Remove the temporary directory and all of its contents
+	rm -rf "${temp_dir}" || : ;
+	# tighten up umask for cleanup
+	umask 137 ;
+	wait ;
+	return $? ;
+}
+
+# === Package Management ===
+function get_package_list() {
+	local req_file="$1"
+	sed -E -e '/^[[:space:]]*$/d' -e '/^[#]+.*$/d' "${req_file}" | \
+		cut -d= -f1 | tr -d '<!>' | \
+		grep -vE "^(pip|setuptools|wheel|build|hypothesis|certifi|chardet)$" | \
+		sort -u
+}
+
+function install_package() {
+	local pkg="$1"
+	# shellcheck disable=SC2086
+	if ! python3 -m pip install $PIP_COMMON_FLAGS $PIP_ENV_FLAGS "${pkg}"; then
+		python3 -B "${CIOUTPUT_PY}" -l warning --file "${req_file}" --title "PIP" "Failed to install ${pkg}" >&2 ;
+		return 6
+	fi
+	return 0
+}
+
+# === Utilities ===
+function report_summary() {
+	python3 -B "${CIOUTPUT_PY}" --group "Results" ;
+	# Improved reporting based on EXIT_CODE
+	case "${EXIT_CODE}" in
+		0) python3 -B "${CIOUTPUT_PY}" -l info --file "${SCRIPT_FILE}" --title "OK" "OK: Found no detected requirements errors." ;;
+		1) python3 -B "${CIOUTPUT_PY}" -l error --file "${SCRIPT_FILE}" --line ${BASH_LINENO:-0} --title "CHECK-PIP" "FAIL: General failure during script execution." >&2 ;;
+		3) python3 -B "${CIOUTPUT_PY}" -l error --file "${SCRIPT_FILE}" --line ${BASH_LINENO:-0} --title "CONFIGURATION" "FAIL: Gathering repostory's requirements failed." >&2 ;;  # git ls-tree command failed
+		4) python3 -B "${CIOUTPUT_PY}" -l critical --file "${SCRIPT_FILE}" --line ${BASH_LINENO:-0} --title "SECURITY" "FAIL: pip-audit detected security vulnerabilities." >&2 ;;
+		5) python3 -B "${CIOUTPUT_PY}" -l error --file "${SCRIPT_FILE}" --line ${BASH_LINENO:-0} --title "LICENSE" "FAIL: pip-licenses detected license issues." >&2 ;;
+		6) python3 -B "${CIOUTPUT_PY}" -l error --file "${SCRIPT_FILE}" --line ${BASH_LINENO:-0} --title "INSTALL" "FAIL: pip install failed." >&2 ;;
+		126) python3 -B "${CIOUTPUT_PY}" -l warning --file "${SCRIPT_FILE}" --line ${BASH_LINENO:-0} --title "SKIPPED" "SKIP: Unable to continue script execution." >&2 ;;
+		*) python3 -B "${CIOUTPUT_PY}" -l error --file "${SCRIPT_FILE}" --line ${BASH_LINENO:-0} --title "FAILED" "FAIL: Detected requirements errors." >&2 ;;
+	esac
+	python3 -B "${CIOUTPUT_PY}" --group ;
+}
+
+function navigate_dirs_by_git() {
+	if GIT_ROOT_DIR=$(git rev-parse --show-superproject-working-tree 2>/dev/null); then
+		if [ -z "${GIT_ROOT_DIR}" ]; then
+			GIT_ROOT_DIR=$(git rev-parse --show-toplevel 2>/dev/null)
+			if [ -z "${GIT_ROOT_DIR}" ]; then
+				python3 -B "${CIOUTPUT_PY}" -l error --file "${SCRIPT_FILE}" --line ${BASH_LINENO:-0} --title "${FUNCNAME:-$0}" "FAIL: Could not determine repository root" >&2
+				EXIT_CODE=40
+				return ${EXIT_CODE}
+			fi
+		fi
+		python3 -B "${CIOUTPUT_PY}" --log-level debug -l debug "Found ${GIT_ROOT_DIR} ..." ;
+	else
+		python3 -B "${CIOUTPUT_PY}" -l error --file "${SCRIPT_FILE}" --line ${BASH_LINENO:-0} --title "${FUNCNAME:-$0}" "FAIL: missing valid repository or source structure" >&2
+		EXIT_CODE=40
+		return ${EXIT_CODE}
+	fi
+}
+
+# === License Validation ===
+function check_package_licenses() {
+	local req_file="$1"
+	local SUB_CODE=${EXIT_CODE-0}
+	local packages
+	# Get and validate packages before moving into venv
+	packages=$(get_package_list "${req_file}")
+	# move into a venv
+	setup_venv ; SUB_CODE=$? ;
+	wait ;
+	python3 -B "${CIOUTPUT_PY}" --log-level debug -l debug "venv setup ... (${SUB_CODE})" ;
+	# Install pip-licenses
+	install_package "pip-licenses>=5.0" || SUB_CODE=6 ;
+	wait ;
+	local pkg
+	# Install the given Python modules using pip
+	# shellcheck disable=SC2086
+	for pkg in ${packages} ; do
+		python3 -B "${CIOUTPUT_PY}" --log-level debug -l debug "Checking license from package '${pkg}' ..." ;
+		REQ_SPEC=$(grep -F -- "${pkg}" <(cat <"${GIT_ROOT_DIR}"/$req_file | sed -E -e '/^[[:space:]]*$/d' | sed -E -e '/^[#]+.*$/d') | grep -m1 -F -- "${pkg}" )
+		ERR_MSG="pip install '${pkg}' failed for $req_file." ;
+		if [[ ("${SUB_CODE}" -eq 0) ]] && install_package "${REQ_SPEC};" 2>/dev/null ;
+		then
+			python3 -B "${CIOUTPUT_PY}" --log-level debug -l debug "Fetched license from package '${pkg}' ..." ;
+		else
+			[[ ("${SUB_CODE}" -eq 0) ]] && SUB_CODE=6 && \
+			python3 -B "${CIOUTPUT_PY}" -l warning --file "${req_file}" --line 1 --col 1 --title "PIP" "${ERR_MSG}" >&2
+		fi
+		unset ERR_MSG 2>/dev/null || : ;
+	done
+
+	# Use pip-licenses to list the licenses of the installed packages
+	# shellcheck disable=SC2086
+	{ pip-licenses $LICENSE_OPTIONS --allow-only="${ALLOW_LICENSES}" || SUB_CODE=5 ;} ; wait ;
+	# Deactivate the virtual environment
+	cleanup_venv || SUB_CODE=89 ;
+	return "${SUB_CODE}"
+}
+
+# THIS IS THE ACTUAL TEST DIR USED (update GIT_ROOT_DIR as needed)
+GIT_ROOT_DIR=$(git rev-parse --show-toplevel 2>/dev/null) ;
+navigate_dirs_by_git
+
+if [[ ("${EXIT_CODE}" -eq 0) ]] ; then
+
+	python3 -B "${CIOUTPUT_PY}" --log-level debug -l debug "Reading from repository ${GIT_ROOT_DIR} ..." ;
+	# Get a list of files to check using git ls-tree with filtering (and careful shell globing)
+	FILES_TO_CHECK=$(git ls-tree -r --full-tree --name-only HEAD -- "${GIT_ROOT_DIR}"/test/requirements.txt "${GIT_ROOT_DIR}"/*-requirements.txt "${GIT_ROOT_DIR}/requirements.txt" 2>/dev/null) || EXIT_CODE=3 ;
+	[[ ( $EXIT_CODE -eq 0 ) ]] || { python3 -B "${CIOUTPUT_PY}" -l error --file "${SCRIPT_FILE}" --line ${BASH_LINENO:-0} --title "GIT" "Failed to list requirements files using git ls-tree" >&2 ;}
+
+	if [[ ("${EXIT_CODE}" -eq 0) ]] ; then
+		# THIS IS THE ACTUAL TEST
+		python3 -B "${CIOUTPUT_PY}" --log-level debug -l debug "Starting checks ..." ;
+		# Iterate over files and run checks
+		for req_file in ${FILES_TO_CHECK} ; do
+			python3 -B "${CIOUTPUT_PY}" --group "Checking ${req_file}" ;
+			if [[ ( -x $(command -v pip-audit) ) ]] && [[ ("${EXIT_CODE}" -eq 0) ]] ; then
+				python3 -B "${CIOUTPUT_PY}" --log-level debug -l debug "Auditing ${req_file} for security vulnerabilities ..."
+				# shellcheck disable=SC2086
+				{ pip-audit $AUDIT_OPTIONS "${req_file}" || EXIT_CODE=4 ;} ; wait ;
+			fi ;
+			if [[ ("${EXIT_CODE}" -eq 0) ]] ; then
+				python3 -B "${CIOUTPUT_PY}" --log-level debug -l debug "Checking licenses in $req_file ..." ;
+				# filter for only pkg from requirements file
+				check_package_licenses "$req_file" ; EXIT_CODE=$?
+			else
+				python3 -B "${CIOUTPUT_PY}" -l error --file "${req_file}" --line 1 --title "REQUIREMENTS" "FAIL: Found requirements errors." >&2 ;
+			fi
+			python3 -B "${CIOUTPUT_PY}" --group ;
+		done
+	fi
+
+	python3 -B "${CIOUTPUT_PY}" --log-level debug -l debug "Summary reporting ..." ;
+	report_summary
+fi
+
+python3 -B "${CIOUTPUT_PY}" --log-level debug -l debug "Cleaning up ..." ;
+cleanup || rm -f "${LOCK_FILE}" 2>/dev/null || : ;
+
+# unset when done
+unset GIT_ROOT_DIR 2>/dev/null || : ;
+unset AUDIT_OPTIONS 2>/dev/null || : ;
+unset ALLOW_LICENSES 2>/dev/null || : ;
+unset LICENSE_OPTIONS 2>/dev/null || : ;
+unset CIOUTPUT_PY 2>/dev/null || : ;
+
+wait ;
+python3 -B .github/tools/cioutput.py --log-level debug -l debug "Check-pip done." ;
+# Exit with the appropriate code
+exit ${EXIT_CODE:-255} ;
